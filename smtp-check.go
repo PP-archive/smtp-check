@@ -1,98 +1,249 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"flag"
+	"io/ioutil"
 	"net"
 	"net/smtp"
 	"os"
+	"strings"
 	"time"
-	/*"net/textproto"*/
 )
 
+type CheckJob struct {
+	DomainPart string
+	LocalParts []string
+}
+
+type CheckResult struct {
+	LocalPart     string `json: "localPart"`
+	DomainPart    string `json: "domainPart"`
+	Email         string `json: "email"`
+	Verified      bool   `json: "verified"`
+	ExecutionTime string `json: "executionTime"`
+	MxFound       bool   `json: "mxFound"`
+}
+
+type Response struct {
+	Error         bool
+	Message       string
+	CheckResults  []CheckResult
+	ExecutionTime string `json: "executionTime"`
+}
+
+func MxLookup(host string) bool {
+	mxServers, err := net.LookupMX(host)
+
+	if err != nil {
+		return false
+	}
+
+	for _, mxServer := range mxServers {
+		MxMap[host] = append(MxMap[host], *mxServer)
+	}
+
+	return true
+}
+
+func processDomainGroup(jobs chan CheckJob, results chan CheckResult) {
+
+	for checkJob := range jobs {
+
+		domainPart, localParts := checkJob.DomainPart, checkJob.LocalParts
+
+		if _, ok := MxMap[domainPart]; !ok {
+			MxLookup(domainPart)
+		}
+
+		if len(MxMap[domainPart]) > 0 {
+			for _, localPart := range localParts {
+				start := time.Now()
+
+				checkResult := CheckResult{LocalPart: localPart, DomainPart: domainPart, Email: localPart + "@" + domainPart, MxFound: true}
+
+				smtpHost := MxMap[domainPart][0].Host
+				smtpPort := "25"
+
+				// to support timeout
+				timeout, _ := time.ParseDuration("10s")
+				Conn, err := net.DialTimeout("tcp", smtpHost+":"+smtpPort, timeout)
+
+				Client, err := smtp.NewClient(Conn, smtpHost)
+
+				if err != nil {
+					//fmt.Println("Connection error: ", err)
+
+					checkResult.ExecutionTime = time.Since(start).String()
+					checkResult.Verified = false
+					results <- checkResult
+
+					continue
+				}
+
+				email := localPart + "@" + domainPart
+
+				err = Client.Hello("hi")
+
+				if err != nil {
+					//fmt.Println("Hello error:", err)
+
+					checkResult.ExecutionTime = time.Since(start).String()
+					checkResult.Verified = false
+					results <- checkResult
+
+					continue
+				}
+				err = Client.Mail(FromMail)
+
+				if err != nil {
+					//fmt.Println("From mail error:", err)
+
+					checkResult.ExecutionTime = time.Since(start).String()
+					checkResult.Verified = false
+					results <- checkResult
+
+					continue
+				}
+				err = Client.Rcpt(email)
+
+				if err != nil {
+					//fmt.Println(err)
+					//fmt.Println(email+" is not verified")
+
+					checkResult.Verified = false
+				} else {
+					//fmt.Println(email+" is verified")
+
+					checkResult.Verified = true
+				}
+
+				Client.Quit()
+				Client.Close()
+
+				checkResult.ExecutionTime = time.Since(start).String()
+				results <- checkResult
+			}
+		} else {
+			for _, localPart := range localParts {
+
+				start := time.Now()
+
+				checkResult := CheckResult{LocalPart: localPart, DomainPart: domainPart, Email: localPart + "@" + domainPart, Verified: false, MxFound: false}
+
+				checkResult.ExecutionTime = time.Since(start).String()
+
+				results <- checkResult
+			}
+		}
+	}
+}
+
+var Filename string
+var MaxGoRoutines int
+var FromMail string
+
+var MxMap map[string][]net.MX
+
+func init() {
+	FilenameFlag := flag.String("filename", "", "name of the file, which contains emails")
+	MaxGoRoutinesFlag := flag.Int("max-go-routines", 3, "max Go routines")
+	FromMailFlag := flag.String("from-email", "test@test.com", "from email")
+
+	flag.Parse()
+
+	MxMap = make(map[string][]net.MX)
+
+	Filename = *FilenameFlag
+	MaxGoRoutines = *MaxGoRoutinesFlag
+	FromMail = *FromMailFlag
+}
+
 func main() {
-	fmt.Printf("Start!\n")
+	var err error
+	var GroupedInput map[string][]string = make(map[string][]string)
+	var TotalEmails int = 0
 
-//	mxServers, err := net.LookupMX("yandex.ru")
-//
-//	if(err != nil) {
-//		fmt.Println("Error:", err)
-//		os.Exit(1)
-//	}
-//
-//	for key, mxServer := range mxServers {
-//		fmt.Println((key+1), ") OK:", mxServer.Host, mxServer.Pref)
-//	}
-//
-//	os.Exit(1)
+	start := time.Now()
 
-	smtpHost := "mx.yandex.ru"
-	smtpPort := "25"
+	// prepare the Response
+	response := Response{CheckResults: make([]CheckResult, 0)}
 
-	// to support timeout
-	timeout, _ := time.ParseDuration("10s")
-	Conn, err := net.DialTimeout("tcp", smtpHost+":"+smtpPort, timeout)
+	defer func() {
+		response.ExecutionTime = time.Since(start).String()
 
-	Client, err := smtp.NewClient(Conn, smtpHost)
+		responseText, _ := json.MarshalIndent(response, "", "    ")
 
-	if(err != nil) {
-		fmt.Println(err)
-		os.Exit(1)
+		// print response
+		fmt.Println(string(responseText))
+	}()
+
+	if(len(Filename) == 1) {
+		response.Error = true
+		response.Message = "Filename should be provided"
+
+		return
 	}
 
-	fmt.Println("Connected to "+smtpHost+":"+smtpPort)
+	// check if the file exists
+	if _, err = os.Stat(Filename); os.IsNotExist(err) {
+		response.Error = true
+		response.Message = fmt.Sprintf("File %s doesn't exist", Filename)
 
-	email1 := "ka-zaido@yandex.ru"
-	//fmt.Println("1] Checking "+email1)
-	//err = Client.Verify(email1)
-
-	err = Client.Hello("hi")
-
-	if(err != nil) {
-		fmt.Println(err)
-	}
-	err = Client.Mail("pavel@kredito.de")
-
-	if(err != nil) {
-		fmt.Println(err)
-	}
-	err = Client.Rcpt(email1)
-
-	if(err != nil) {
-		fmt.Println(err)
-		fmt.Println(email1+" is not verified")
-	} else {
-		fmt.Println(email1+" is verified")
+		return
 	}
 
-	Client.Quit()
-	Client.Close()
+	Content, err := ioutil.ReadFile(Filename)
 
-	// 2nd mail
-	Client, _ = smtp.Dial(smtpHost+":"+smtpPort)
+	if err != nil {
+		response.Error = true
+		response.Message = "Error during the file read"
 
-	email2 := "ka-z444aido@yandex.ru"
-
-	err = Client.Hello("hi")
-
-	if(err != nil) {
-		fmt.Println(err)
-	}
-	err = Client.Mail("pavel@kredito.de")
-
-	if(err != nil) {
-		fmt.Println(err)
-	}
-	err = Client.Rcpt(email2)
-
-	if(err != nil) {
-		fmt.Println(err)
-		fmt.Println(email2+" is not verified")
-	} else {
-		fmt.Println(email2+" is verified")
+		return
 	}
 
-	Client.Quit()
-	Client.Close()
+	// split by sections
+	var Lines []string = strings.Split(string(Content), "\n")
 
-	fmt.Println("Check complete")
+	for _, value := range Lines {
+		var LocalPart string
+		var DomainPart string
+		var Parts []string
+
+		Parts = strings.Split(value, "@")
+
+		if len(Parts) == 2 {
+			LocalPart, DomainPart = Parts[0], Parts[1]
+
+			GroupedInput[DomainPart] = append(GroupedInput[DomainPart], LocalPart)
+
+			TotalEmails++
+		} else {
+			// skip this line
+		}
+	}
+
+	jobs := make(chan CheckJob, len(GroupedInput))
+	results := make(chan CheckResult, TotalEmails)
+
+	if len(GroupedInput) < MaxGoRoutines {
+		MaxGoRoutines = len(GroupedInput)
+	}
+
+	for i := 0; i < MaxGoRoutines; i++ {
+		go processDomainGroup(jobs, results)
+	}
+
+	for domainPart, localParts := range GroupedInput {
+		jobs <- CheckJob{DomainPart: domainPart, LocalParts: localParts}
+	}
+
+	for i := 0; i < TotalEmails; i++ {
+		result := <-results
+		response.CheckResults = append(response.CheckResults, result)
+	}
+
+	response.Error = false
+
 }
