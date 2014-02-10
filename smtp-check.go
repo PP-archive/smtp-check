@@ -47,6 +47,7 @@ func MxLookup(host string) bool {
 	return true
 }
 
+// process the domain group, domain group contains all the mails for the certain domain
 func processDomainGroup(jobs chan CheckJob, results chan CheckResult) {
 
 	for checkJob := range jobs {
@@ -146,6 +147,7 @@ var FromMail string
 
 var MxMap map[string][]net.MX
 
+// set the flags from the command line, or, from the default values
 func init() {
 	FilenameFlag := flag.String("filename", "", "name of the file, which contains emails")
 	MaxGoRoutinesFlag := flag.Int("max-go-routines", 3, "max Go routines")
@@ -170,6 +172,7 @@ func main() {
 	// prepare the Response
 	response := Response{CheckResults: make([]CheckResult, 0)}
 
+	// call the function when everything is done
 	defer func() {
 		response.ExecutionTime = time.Since(start).String()
 
@@ -203,7 +206,7 @@ func main() {
 		return
 	}
 
-	// split by sections
+	// split by domain groups
 	var Lines []string = strings.Split(string(Content), "\n")
 
 	for _, value := range Lines {
@@ -224,26 +227,32 @@ func main() {
 		}
 	}
 
+	// prepare the jobs and the results channels
 	jobs := make(chan CheckJob, len(GroupedInput))
 	results := make(chan CheckResult, TotalEmails)
 
+	// set the correct max go routines value
 	if len(GroupedInput) < MaxGoRoutines {
 		MaxGoRoutines = len(GroupedInput)
 	}
 
+	// launch workers
 	for i := 0; i < MaxGoRoutines; i++ {
 		go processDomainGroup(jobs, results)
 	}
 
+	// push jobs
 	for domainPart, localParts := range GroupedInput {
 		jobs <- CheckJob{DomainPart: domainPart, LocalParts: localParts}
 	}
 
+	// get the results
 	for i := 0; i < TotalEmails; i++ {
 		result := <-results
 		response.CheckResults = append(response.CheckResults, result)
 	}
 
+	// finally we're sure that the run is correct
 	response.Error = false
 
 }
