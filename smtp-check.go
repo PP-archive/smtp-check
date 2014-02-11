@@ -208,7 +208,7 @@ func main() {
 		fmt.Println(string(responseText))
 	}()
 
-	if(len(Filename) == 1) {
+	if(len(Filename) == 0) {
 		response.Error = true
 		response.Message = "Filename should be provided"
 
