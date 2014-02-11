@@ -141,6 +141,32 @@ func processDomainGroup(jobs chan CheckJob, results chan CheckResult) {
 	}
 }
 
+// parse lines array to the GroupedInput format
+func parseGroupedInput(Lines []string) (map[string][]string, int) {
+	var TotalEmails int = 0
+	var GroupedInput map[string][]string = make(map[string][]string)
+
+	for _, value := range Lines {
+		var LocalPart string
+		var DomainPart string
+		var Parts []string
+
+		Parts = strings.Split(value, "@")
+
+		if len(Parts) == 2 {
+			LocalPart, DomainPart = Parts[0], Parts[1]
+
+			GroupedInput[DomainPart] = append(GroupedInput[DomainPart], LocalPart)
+
+			TotalEmails++
+		} else {
+			// skip this line
+		}
+	}
+
+	return GroupedInput, TotalEmails
+}
+
 var Filename string
 var MaxGoRoutines int
 var FromMail string
@@ -209,23 +235,8 @@ func main() {
 	// split by domain groups
 	var Lines []string = strings.Split(string(Content), "\n")
 
-	for _, value := range Lines {
-		var LocalPart string
-		var DomainPart string
-		var Parts []string
-
-		Parts = strings.Split(value, "@")
-
-		if len(Parts) == 2 {
-			LocalPart, DomainPart = Parts[0], Parts[1]
-
-			GroupedInput[DomainPart] = append(GroupedInput[DomainPart], LocalPart)
-
-			TotalEmails++
-		} else {
-			// skip this line
-		}
-	}
+	// parse file contents to the group input format
+	GroupedInput, TotalEmails = parseGroupedInput(Lines)
 
 	// prepare the jobs and the results channels
 	jobs := make(chan CheckJob, len(GroupedInput))
